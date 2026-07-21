@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Armory Notes
-// @version      4.0
+// @version      3.1
 // @description  Shared Torn notes. Edit access is authenticated via your public Torn API key; everyone else is read-only.
 // @updateURL    https://raw.githubusercontent.com/TravisDoo/TNL-Torn-Scripts/main/Armory.user.js
 // @downloadURL  https://raw.githubusercontent.com/TravisDoo/TNL-Torn-Scripts/main/Armory.user.js
