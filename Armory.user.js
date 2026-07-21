@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Armory Notes
-// @version      3.3
+// @version      3.4
 // @description  Shared Torn notes. Edit access is authenticated via your public Torn API key; everyone else is read-only.
 // @updateURL    https://raw.githubusercontent.com/TravisDoo/TNL-Torn-Scripts/main/Armory.user.js
 // @downloadURL  https://raw.githubusercontent.com/TravisDoo/TNL-Torn-Scripts/main/Armory.user.js
 // @match        https://www.torn.com/item.php*
 // @match        https://www.torn.com/factions.php?step=your*
 // @match        https://www.torn.com/trade.php*
+// @match        https://www.torn.com/*
 // @grant        GM_registerMenuCommand
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -102,66 +103,107 @@
   }
 
   // Torn PDA and some mobile userscript managers do not reliably expose
-  // GM_registerMenuCommand. This creates an on-page button so mobile users can
-  // view their access level and set/update their public Torn API key.
-  function addMobileAccessButton() {
-    if (!isMobile && !IS_PDA) return;
-    if (document.getElementById('tnl-mobile-access-btn')) return;
+  // GM_registerMenuCommand. Instead of using a floating button, add an Armory
+  // Notes entry to Torn PDA's Settings -> Utilities section.
+  function openArmoryAccessSettings() {
+    const userId = TORN_USER_ID ? `#${TORN_USER_ID}` : 'unknown';
+    const userName = TORN_USER_NAME || 'unknown';
+    const keyState = getTornApiKey() ? 'set' : 'not set';
 
-    const btn = document.createElement('button');
-    btn.id = 'tnl-mobile-access-btn';
-    btn.type = 'button';
+    const openKeyPrompt = confirm(
+      'Armory Notes\n\n' +
+      `User: ${userName} (${userId})\n` +
+      `Role: ${USER_ROLE}\n` +
+      `Write access: ${USER_CAN_WRITE ? 'yes' : 'no'}\n` +
+      `Torn API key: ${keyState}\n\n` +
+      'Press OK to set or update your PUBLIC Torn API key.\n' +
+      'Press Cancel to close this message.'
+    );
 
-    if (USER_ROLE === 'leadership') {
-      btn.textContent = '👑 Notes';
-    } else if (USER_CAN_WRITE) {
-      btn.textContent = '✏️ Notes';
-    } else {
-      btn.textContent = '🔑 Notes';
+    if (openKeyPrompt) promptSetApiKey();
+  }
+
+  function makeSettingsKeyIcon(templateSvg) {
+    const NS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', templateSvg?.getAttribute('width') || '24');
+    svg.setAttribute('height', templateSvg?.getAttribute('height') || '24');
+    svg.setAttribute('aria-hidden', 'true');
+
+    if (templateSvg?.getAttribute('class')) {
+      svg.setAttribute('class', templateSvg.getAttribute('class'));
     }
 
-    btn.title = 'Armory Notes access and API-key settings';
-    btn.style.cssText = `
-      position:fixed;
-      right:12px;
-      bottom:calc(76px + env(safe-area-inset-bottom));
-      z-index:1000001;
-      padding:9px 12px;
-      border:1px solid rgba(255,255,255,0.25);
-      border-radius:9px;
-      background:#222;
-      color:#fff;
-      font-size:12px;
-      font-weight:600;
-      line-height:1;
-      box-shadow:0 4px 14px rgba(0,0,0,0.45);
-      cursor:pointer;
-      touch-action:manipulation;
-      pointer-events:auto;
-    `;
+    const group = document.createElementNS(NS, 'g');
+    group.setAttribute('fill', 'currentColor');
 
-    btn.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
+    const path = document.createElementNS(NS, 'path');
+    path.setAttribute(
+      'd',
+      'M7 9a5 5 0 1 0 4.58 7H16v-2h2v-2h2v-2h4V6H11.58A5 5 0 0 0 7 9Zm0 3a2 2 0 1 1 0 4 2 2 0 0 1 0-4Z'
+    );
 
-      const userId = TORN_USER_ID ? `#${TORN_USER_ID}` : 'unknown';
-      const userName = TORN_USER_NAME || 'unknown';
-      const keyState = getTornApiKey() ? 'set' : 'not set';
+    group.appendChild(path);
+    svg.appendChild(group);
+    return svg;
+  }
 
-      const openKeyPrompt = confirm(
-        'Armory Notes\n\n' +
-        `User: ${userName} (${userId})\n` +
-        `Role: ${USER_ROLE}\n` +
-        `Write access: ${USER_CAN_WRITE ? 'yes' : 'no'}\n` +
-        `Torn API key: ${keyState}\n\n` +
-        'Press OK to set or update your PUBLIC Torn API key.\n' +
-        'Press Cancel to close this message.'
+  function injectSettingsUtilityButton() {
+    if (!isMobile && !IS_PDA) return;
+
+    const headers = Array.from(document.querySelectorAll('span')).filter(
+      (el) => (el.textContent || '').trim().toLowerCase() === 'utilities'
+    );
+
+    for (const header of headers) {
+      const section = header.parentElement;
+      if (!section) continue;
+
+      let buttonContainer = Array.from(section.children).find(
+        (child) => child !== header && child.querySelector?.('button')
       );
 
-      if (openKeyPrompt) promptSetApiKey();
-    });
+      if (!buttonContainer) {
+        const sample = section.querySelector('button');
+        buttonContainer = sample?.parentElement || null;
+      }
 
-    document.body.appendChild(btn);
+      if (!buttonContainer) continue;
+      if (buttonContainer.querySelector('[data-tnl-armory-settings-button="1"]')) continue;
+
+      const sampleButton = buttonContainer.querySelector('button');
+      if (!sampleButton) continue;
+
+      const button = sampleButton.cloneNode(true);
+      button.dataset.tnlArmorySettingsButton = '1';
+      button.type = 'button';
+      button.disabled = false;
+      button.removeAttribute('disabled');
+      button.removeAttribute('aria-disabled');
+      button.setAttribute('aria-label', 'Armory Notes API Key');
+      button.title = 'View access or set your Armory Notes Torn API key';
+
+      const spans = Array.from(button.querySelectorAll('span'));
+      const title = spans.find((span) => {
+        const value = (span.textContent || '').trim().toLowerCase();
+        return value === 'mark all as read' || value === 'close all private chats';
+      }) || spans.at(-1);
+
+      if (title) title.textContent = 'Armory Notes API Key';
+
+      const oldSvg = button.querySelector('svg');
+      if (oldSvg) oldSvg.replaceWith(makeSettingsKeyIcon(oldSvg));
+
+      button.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openArmoryAccessSettings();
+      });
+
+      buttonContainer.appendChild(button);
+      log('Added Armory Notes to Settings -> Utilities');
+    }
   }
 
   let USER_ROLE = 'readonly';
@@ -1199,11 +1241,16 @@
   // Step 3 — register menus now that we know whether the user can write
   registerMenus();
 
-  // Torn PDA/mobile fallback for setting the public Torn API key.
-  addMobileAccessButton();
+  // Torn PDA/mobile fallback inside Settings -> Utilities.
+  injectSettingsUtilityButton();
 
-  // Step 4 — now that we know the role, paint the UI
-  initAll();
+  // Step 4 — now that we know the role, paint the notes UI on supported pages.
+  const supportsNotesUI =
+    location.pathname === '/item.php' ||
+    location.pathname === '/factions.php' ||
+    location.pathname === '/trade.php';
+
+  if (supportsNotesUI) initAll();
 
   let moScheduled = false;
   const pendingRoots = new Set();
@@ -1220,7 +1267,14 @@
       if (pendingRoots.size === 0) return;
       const roots = Array.from(pendingRoots);
       pendingRoots.clear();
-      for (const root of roots) initAll(root);
+
+      // Settings is rendered dynamically by Torn PDA. Re-check the document
+      // whenever the panel or one of its tabs is mounted.
+      injectSettingsUtilityButton();
+
+      if (supportsNotesUI) {
+        for (const root of roots) initAll(root);
+      }
     }, 150);
   });
   mo.observe(document.body, { childList: true, subtree: true });
