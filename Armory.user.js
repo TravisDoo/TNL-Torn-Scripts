@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Armory Notes
-// @version      3.2
+// @version      3.3
 // @description  Shared Torn notes. Edit access is authenticated via your public Torn API key; everyone else is read-only.
 // @updateURL    https://raw.githubusercontent.com/TravisDoo/TNL-Torn-Scripts/main/Armory.user.js
 // @downloadURL  https://raw.githubusercontent.com/TravisDoo/TNL-Torn-Scripts/main/Armory.user.js
@@ -44,9 +44,12 @@
     /GMforPDA/i.test((window.GM_info && window.GM_info.scriptHandler) || '') ||
     typeof window.PDA_httpGet === 'function';
 
-  const registerMenu = typeof window.GM_registerMenuCommand === 'function'
-    ? window.GM_registerMenuCommand.bind(window)
-    : () => {};
+  const registerMenu =
+    typeof GM_registerMenuCommand === 'function'
+      ? GM_registerMenuCommand
+      : (typeof window.GM_registerMenuCommand === 'function'
+          ? window.GM_registerMenuCommand.bind(window)
+          : () => {});
 
   const API_KEY_STORE    = 'torn-notes-torn-api-key';
   const API_KEY_PROMPTED = 'torn-notes-api-key-prompted-v1';
@@ -96,6 +99,69 @@
       ? 'Torn API key saved. Reloading to apply…'
       : 'Torn API key cleared. Reloading to apply…');
     location.reload();
+  }
+
+  // Torn PDA and some mobile userscript managers do not reliably expose
+  // GM_registerMenuCommand. This creates an on-page button so mobile users can
+  // view their access level and set/update their public Torn API key.
+  function addMobileAccessButton() {
+    if (!isMobile && !IS_PDA) return;
+    if (document.getElementById('tnl-mobile-access-btn')) return;
+
+    const btn = document.createElement('button');
+    btn.id = 'tnl-mobile-access-btn';
+    btn.type = 'button';
+
+    if (USER_ROLE === 'leadership') {
+      btn.textContent = '👑 Notes';
+    } else if (USER_CAN_WRITE) {
+      btn.textContent = '✏️ Notes';
+    } else {
+      btn.textContent = '🔑 Notes';
+    }
+
+    btn.title = 'Armory Notes access and API-key settings';
+    btn.style.cssText = `
+      position:fixed;
+      right:12px;
+      bottom:calc(76px + env(safe-area-inset-bottom));
+      z-index:1000001;
+      padding:9px 12px;
+      border:1px solid rgba(255,255,255,0.25);
+      border-radius:9px;
+      background:#222;
+      color:#fff;
+      font-size:12px;
+      font-weight:600;
+      line-height:1;
+      box-shadow:0 4px 14px rgba(0,0,0,0.45);
+      cursor:pointer;
+      touch-action:manipulation;
+      pointer-events:auto;
+    `;
+
+    btn.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      const userId = TORN_USER_ID ? `#${TORN_USER_ID}` : 'unknown';
+      const userName = TORN_USER_NAME || 'unknown';
+      const keyState = getTornApiKey() ? 'set' : 'not set';
+
+      const openKeyPrompt = confirm(
+        'Armory Notes\n\n' +
+        `User: ${userName} (${userId})\n` +
+        `Role: ${USER_ROLE}\n` +
+        `Write access: ${USER_CAN_WRITE ? 'yes' : 'no'}\n` +
+        `Torn API key: ${keyState}\n\n` +
+        'Press OK to set or update your PUBLIC Torn API key.\n' +
+        'Press Cancel to close this message.'
+      );
+
+      if (openKeyPrompt) promptSetApiKey();
+    });
+
+    document.body.appendChild(btn);
   }
 
   let USER_ROLE = 'readonly';
@@ -1132,6 +1198,9 @@
 
   // Step 3 — register menus now that we know whether the user can write
   registerMenus();
+
+  // Torn PDA/mobile fallback for setting the public Torn API key.
+  addMobileAccessButton();
 
   // Step 4 — now that we know the role, paint the UI
   initAll();
