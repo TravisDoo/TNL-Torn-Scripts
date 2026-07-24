@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TNL Merc Request
 // @namespace    https://www.torn.com/
-// @version      2.0.2
-// @description  Lightweight single-hit Regular or Stricken request tool for TNL.
+// @version      1.0
+// @description  Request a Regular or Stricken Hosp
 // @author       Dooby [2605556]
 // @license      Personal Use
 // @match        https://www.torn.com/*
