@@ -1,7 +1,9 @@
 // ==UserScript==
 // @name         TNL Merc Request
 // @namespace    https://www.torn.com/
-// @version      1.0
+// @version      1.0.1
+// @updateURL    https://raw.githubusercontent.com/TravisDoo/TNL-Torn-Scripts/main/TNL-Merc-Request.js
+// @downloadURL  https://raw.githubusercontent.com/TravisDoo/TNL-Torn-Scripts/main/TNL-Merc-Request.js
 // @description  Request a Regular or Stricken Hosp
 // @author       Dooby [2605556]
 // @license      Personal Use
