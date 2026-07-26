@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TNL Merc Request
 // @namespace    https://www.torn.com/
-// @version      1.0.1
+// @version      1.1.1
 // @updateURL    https://raw.githubusercontent.com/TravisDoo/TNL-Torn-Scripts/main/TNL-Merc-Request.js
 // @downloadURL  https://raw.githubusercontent.com/TravisDoo/TNL-Torn-Scripts/main/TNL-Merc-Request.js
 // @description  Request a Regular or Stricken Hosp
@@ -17,13 +17,13 @@
 // @grant        GM_addStyle
 // @connect      api.torn.com
 // @connect      i.ibb.co
-// @connect      bunch-uphold-antennae.ngrok-free.dev
+// @connect      merc.the-next-level.net
 // ==/UserScript==
 
 (() => {
     'use strict';
 
-    const CFG = { endpoint: 'https://bunch-uphold-antennae.ngrok-free.dev/merc-request', mobileBreak: 768, maxNotes: 500 };
+    const CFG = { endpoint: 'https://merc.the-next-level.net/merc-request', mobileBreak: 768, maxNotes: 500 };
     const LOGO = 'https://i.ibb.co/Lzh9FqpW/TNL.png';
 
     const KEYS = { apiKey: 'tnl_merc_api_key', tornId: 'tnl_merc_torn_id', tornName: 'tnl_merc_torn_name' };
@@ -368,7 +368,7 @@
                 const res = await request({
                     method: 'POST',
                     url: CFG.endpoint,
-                    headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Torn-Key': identity.apiKey, 'ngrok-skip-browser-warning': 'true' },
+                    headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Torn-Key': identity.apiKey },
                     data: JSON.stringify({ target_id: Number(targetId), hit_type: hitType, hits: 1, notes }),
                 });
                 const data = parseJson(res.responseText);
