@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Armory Notes
-// @version      3.4
+// @version      3.6
 // @description  Shared Torn notes. Edit access is authenticated via your public Torn API key; everyone else is read-only.
 // @updateURL    https://raw.githubusercontent.com/TravisDoo/TNL-Torn-Scripts/main/Armory.user.js
 // @downloadURL  https://raw.githubusercontent.com/TravisDoo/TNL-Torn-Scripts/main/Armory.user.js
@@ -19,7 +19,6 @@
 // @author       DoobyDoo, MonChoon
 // ==/UserScript==
 
-// TESTING A NOTE
 (async function () {
   'use strict';
 
@@ -74,8 +73,6 @@
     'Leave this blank to stay in read-only mode. You can set it later from the\n' +
     'Tampermonkey menu → "🔑 Set / update Torn API key".';
 
-  // Prompt for the key the first time only. Read-only members can dismiss the
-  // prompt once and won't be nagged again; they can opt in later via the menu.
   async function ensureApiKey() {
     const existing = getTornApiKey();
     if (existing) return existing;
@@ -90,8 +87,6 @@
     return '';
   }
 
-  // Menu action — set/update/clear the key, then reload so the script
-  // re-bootstraps and re-runs the access check with the new key.
   function promptSetApiKey() {
     const entered = prompt(API_KEY_PROMPT_MSG, getTornApiKey());
     if (entered === null) return; // cancelled
@@ -102,20 +97,20 @@
     location.reload();
   }
 
-  // Torn PDA and some mobile userscript managers do not reliably expose
-  // GM_registerMenuCommand. Instead of using a floating button, add an Armory
-  // Notes entry to Torn PDA's Settings -> Utilities section.
   function openArmoryAccessSettings() {
     const userId = TORN_USER_ID ? `#${TORN_USER_ID}` : 'unknown';
     const userName = TORN_USER_NAME || 'unknown';
     const keyState = getTornApiKey() ? 'set' : 'not set';
+
+    const serverState = ACCESS_SOURCE === 'error' ? 'unreachable' : 'reachable';
 
     const openKeyPrompt = confirm(
       'Armory Notes\n\n' +
       `User: ${userName} (${userId})\n` +
       `Role: ${USER_ROLE}\n` +
       `Write access: ${USER_CAN_WRITE ? 'yes' : 'no'}\n` +
-      `Torn API key: ${keyState}\n\n` +
+      `Torn API key: ${keyState}\n` +
+      `Server: ${serverState}\n\n` +
       'Press OK to set or update your PUBLIC Torn API key.\n' +
       'Press Cancel to close this message.'
     );
@@ -157,59 +152,68 @@
     );
 
     for (const header of headers) {
-      const section = header.parentElement;
-      if (!section) continue;
+      try {
+        const section = header.parentElement;
+        if (!section) continue;
 
-      let buttonContainer = Array.from(section.children).find(
-        (child) => child !== header && child.querySelector?.('button')
-      );
+        let buttonContainer = Array.from(section.children).find(
+          (child) => child !== header && child.querySelector?.('button')
+        );
 
-      if (!buttonContainer) {
-        const sample = section.querySelector('button');
-        buttonContainer = sample?.parentElement || null;
+        if (!buttonContainer) {
+          const sample = section.querySelector('button');
+          buttonContainer = sample?.parentElement || null;
+        }
+
+        if (!buttonContainer) continue;
+        if (buttonContainer.querySelector('[data-tnl-armory-settings-button="1"]')) continue;
+
+        const sampleButton = buttonContainer.querySelector('button');
+        if (!sampleButton) continue;
+
+        const button = sampleButton.cloneNode(true);
+        button.dataset.tnlArmorySettingsButton = '1';
+        button.type = 'button';
+        button.disabled = false;
+        button.removeAttribute('disabled');
+        button.removeAttribute('aria-disabled');
+        button.setAttribute('aria-label', 'Armory Notes API Key');
+        button.title = 'View access or set your Armory Notes Torn API key';
+
+        const spans = Array.from(button.querySelectorAll('span'));
+        const title = spans.find((span) => {
+          const value = (span.textContent || '').trim().toLowerCase();
+          return value === 'mark all as read' || value === 'close all private chats';
+        }) || spans.at(-1);
+
+        if (title) title.textContent = 'Armory Notes API Key';
+
+        const oldSvg = button.querySelector('svg');
+        if (oldSvg) oldSvg.replaceWith(makeSettingsKeyIcon(oldSvg));
+
+        button.addEventListener('click', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          openArmoryAccessSettings();
+        });
+
+        buttonContainer.appendChild(button);
+        log('Added Armory Notes to Settings -> Utilities');
+      } catch (e) {
+        log('injectSettingsUtilityButton: skipped one header due to error', e);
       }
-
-      if (!buttonContainer) continue;
-      if (buttonContainer.querySelector('[data-tnl-armory-settings-button="1"]')) continue;
-
-      const sampleButton = buttonContainer.querySelector('button');
-      if (!sampleButton) continue;
-
-      const button = sampleButton.cloneNode(true);
-      button.dataset.tnlArmorySettingsButton = '1';
-      button.type = 'button';
-      button.disabled = false;
-      button.removeAttribute('disabled');
-      button.removeAttribute('aria-disabled');
-      button.setAttribute('aria-label', 'Armory Notes API Key');
-      button.title = 'View access or set your Armory Notes Torn API key';
-
-      const spans = Array.from(button.querySelectorAll('span'));
-      const title = spans.find((span) => {
-        const value = (span.textContent || '').trim().toLowerCase();
-        return value === 'mark all as read' || value === 'close all private chats';
-      }) || spans.at(-1);
-
-      if (title) title.textContent = 'Armory Notes API Key';
-
-      const oldSvg = button.querySelector('svg');
-      if (oldSvg) oldSvg.replaceWith(makeSettingsKeyIcon(oldSvg));
-
-      button.addEventListener('click', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        openArmoryAccessSettings();
-      });
-
-      buttonContainer.appendChild(button);
-      log('Added Armory Notes to Settings -> Utilities');
     }
   }
 
   let USER_ROLE = 'readonly';
   let USER_CAN_WRITE = false;
 
-  async function fetchAccessRole() {
+  let ACCESS_SOURCE = 'live';
+
+  const ACCESS_CACHE_KEY = 'torn-notes-access-cache-v1';
+  const ACCESS_CACHE_TTL_MS = 5 * 60 * 1000;
+
+  async function fetchAccessRoleLive() {
     return new Promise((resolve) => {
       GM_xmlhttpRequest({
         method: 'GET',
@@ -224,18 +228,74 @@
         onload: (r) => {
           try {
             const d = JSON.parse(r.responseText);
-            resolve(d);
+            resolve({ ok: true, ...d });
           } catch {
-            resolve({ role: 'readonly', canWrite: false });
+            resolve({ ok: false });
           }
         },
-        onerror: () => resolve({ role: 'readonly', canWrite: false }),
-        ontimeout: () => resolve({ role: 'readonly', canWrite: false })
+        onerror: () => resolve({ ok: false }),
+        ontimeout: () => resolve({ ok: false })
       });
     });
   }
 
-  // ---------- Theme ----------
+  function readAccessCache() {
+    try {
+      const c = GM_getValue(ACCESS_CACHE_KEY, null);
+      return (c && c.d) ? c : null;
+    } catch (e) {
+      log('access cache read error', e);
+      return null;
+    }
+  }
+
+  function writeAccessCache(d) {
+    try { GM_setValue(ACCESS_CACHE_KEY, { d, t: Date.now() }); } catch (e) { log('access cache write error', e); }
+  }
+
+  async function getAccessRole() {
+    const cached = readAccessCache();
+
+    if (cached && (Date.now() - cached.t) < ACCESS_CACHE_TTL_MS) {
+      ACCESS_SOURCE = 'cache';
+      return cached.d;
+    }
+
+    const result = await fetchAccessRoleLive();
+
+    if (result.ok) {
+      ACCESS_SOURCE = 'live';
+      const d = {
+        role: result.role || 'readonly',
+        canWrite: !!result.canWrite,
+        userId: result.userId || null,
+        name: result.name || null
+      };
+      writeAccessCache(d);
+      return d;
+    }
+
+    ACCESS_SOURCE = 'error';
+    if (cached) {
+      console.warn('[TornNotes] Server unreachable — reusing last known access level from', new Date(cached.t).toLocaleString());
+      return cached.d;
+    }
+
+    console.warn('[TornNotes] Server unreachable and no cached access level — defaulting to read-only.');
+    return { role: 'readonly', canWrite: false, userId: null, name: null };
+  }
+
+  async function forceRefreshAccess() {
+    try { GM_deleteValue(ACCESS_CACHE_KEY); } catch (e) { log('access cache clear error', e); }
+    const before = { role: USER_ROLE, canWrite: USER_CAN_WRITE };
+    const fresh = await getAccessRole();
+    if (fresh.role !== before.role || !!fresh.canWrite !== before.canWrite) {
+      alert('Armory Notes: access level changed. Reloading…');
+      location.reload();
+    } else {
+      alert(`Armory Notes: access level unchanged (${fresh.role}).`);
+    }
+  }
 
   function cycleTheme() {
     const idx = THEMES.indexOf(tooltipTheme);
@@ -547,26 +607,32 @@
       log('PUT to server for', key);
       await req('PUT', `/api/torn-notes/${TEAM_ID}/${encodeURIComponent(key)}`, data);
       log('PUT success for', key);
+      return true;
     } catch (e) {
       console.error('[TornNotes] PUT failed for', key, e);
       alert(`Torn Notes: failed to save note for key ${key}. See console for details.`);
+      return false;
     }
   }
 
   async function delData(key) {
+    const prev = getCached(key);
     setCached(key, {});
     try { applyDataToUI(key, {}); } catch (e) { log('applyDataToUI (delete) error for', key, e); }
     try {
       await req('DELETE', `/api/torn-notes/${TEAM_ID}/${encodeURIComponent(key)}`);
+      return true;
     } catch (e) {
       log('DELETE failed for', key, e);
+      setCached(key, prev);
+      try { applyDataToUI(key, prev); } catch (e2) { log('applyDataToUI (restore) error for', key, e2); }
+      alert(`Torn Notes: failed to delete note for key ${key}. See console for details.`);
+      return false;
     }
   }
 
   async function handleClick(key, el, badge, label) {
     if (deletionMode) {
-      // Deletion mode repurposes the note button: clicking it removes the
-      // saved note instead of opening the edit prompts.
       if (confirm(`Delete the saved note for ${label}?`)) {
         log('Deletion mode: deleting', key);
         await delData(key);
@@ -579,21 +645,17 @@
     const cur = await ensureFresh(key, { force: true });
     log('Current remote value for', key, cur);
 
-    const note = prompt(`Note for ${label}:`, cur.note || '');
-    if (note === null) return;
-    const colour = prompt('Colour tag (CSS/hex):', cur.colour || '');
-    if (colour === null) return;
-    const owner = prompt('Owner (name):', cur.owner || '');
-    if (owner === null) return;
-
-    const d = {
-      note: note.trim(),
-      colour: colour.trim(),
-      owner: owner.trim()
-    };
-    log('Saving', key, d);
-    await saveData(key, d);
-    log('Saved', key);
+    openNoteModal(label, cur, {
+      onSave: async (d) => {
+        log('Saving', key, d);
+        await saveData(key, d);
+        log('Saved', key);
+      },
+      onDelete: async () => {
+        log('Deleting via modal', key);
+        await delData(key);
+      }
+    });
   }
 
   // ---------- UI index + refresh ----------
@@ -730,10 +792,6 @@
 
     if (!badge) badge = makeOwnerBadge('');
 
-    // Only create the edit button for users with write access.
-    // We wait until the access check resolves (USER_CAN_WRITE is set during
-    // bootstrap) so the button either appears or is omitted — never shown
-    // then hidden — which avoids flicker for read-only users.
     if (!btn && USER_CAN_WRITE) btn = makeNoteButton();
 
     controls.textContent = '';
@@ -843,6 +901,7 @@
       position:relative; z-index:1001; pointer-events:auto !important;
     }
     .torn-note-btn:hover{ opacity:1; }
+    .torn-note-btn:disabled{ opacity:0.4; cursor:default; }
 
     .tnl-controls{
       display:inline-flex;
@@ -876,6 +935,8 @@
     overflow: visible !important;
     white-space: nowrap !important;
     vertical-align: middle !important;
+    position: relative !important;
+    z-index: 9999 !important;
 }
 
 /* Weapon name and RW bonus share the remaining space */
@@ -900,7 +961,14 @@
     pointer-events: none !important;
 }
 
-/* Never allow the owner and edit controls to shrink */
+/* Never allow the owner and edit controls to shrink, and keep them above
+   Torn's neighboring columns / display-only elements */
+.name-wrap {
+    position: relative !important;
+    z-index: 9998 !important;
+    overflow: visible !important;
+}
+
 .name-wrap > .name.tnl-name > .tnl-controls {
     display: inline-flex !important;
     align-items: center !important;
@@ -912,35 +980,7 @@
     pointer-events: auto !important;
 }
 
-/* Keep the edit button above all display-only elements */
-.name-wrap > .name.tnl-name .torn-note-btn {
-    display: inline-block !important;
-    flex: 0 0 auto !important;
-    position: relative !important;
-    z-index: 10001 !important;
-    pointer-events: auto !important;
-}
-
-/* Keep Armory Notes controls above Torn's neighboring columns */
-.name-wrap {
-    position: relative !important;
-    z-index: 9998 !important;
-    overflow: visible !important;
-}
-
-.name-wrap > .name.tnl-name {
-    position: relative !important;
-    z-index: 9999 !important;
-    overflow: visible !important;
-}
-
-.name-wrap > .name.tnl-name > .tnl-controls {
-    position: relative !important;
-    z-index: 10000 !important;
-    pointer-events: auto !important;
-}
-
-/* Give the paper icon a real clickable area */
+/* Give the paper icon a real clickable area, and keep it above the rest */
 .name-wrap > .name.tnl-name .torn-note-btn {
     display: inline-flex !important;
     align-items: center !important;
@@ -958,6 +998,199 @@
 }
   `;
   document.head.appendChild(style);
+
+  // ---------- Note editor modal ----------
+
+  // Replaces the old note/colour/owner prompt() chain with a single styled
+  // form. Prompt chains are especially rough on mobile (three separate
+  // native dialogs in a row) and don't match the Council manager's UI.
+  const noteModalStyle = document.createElement('style');
+  noteModalStyle.textContent = `
+    .tnl-note-overlay{
+      position:fixed; inset:0; z-index:1000000;
+      background:rgba(0,0,0,0.55);
+      display:flex; align-items:center; justify-content:center; padding:16px;
+    }
+    .tnl-note-panel{
+      background:#1b1b1b; color:#f0f0f0;
+      border:1px solid rgba(255,255,255,0.15); border-radius:10px;
+      width:100%; max-width:420px; max-height:85vh; overflow:auto;
+      padding:16px 18px; box-shadow:0 12px 40px rgba(0,0,0,0.5);
+      font-size:13px; line-height:1.4;
+    }
+    .tnl-note-title{
+      font-size:15px; font-weight:600; margin-bottom:12px;
+      overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    }
+    .tnl-note-field{ margin-bottom:12px; }
+    .tnl-note-label{ display:block; font-size:11px; opacity:0.7; margin-bottom:4px; }
+    .tnl-note-input, .tnl-note-textarea{
+      width:100%; box-sizing:border-box; background:#111; color:#f0f0f0;
+      border:1px solid rgba(255,255,255,0.2); border-radius:6px;
+      padding:7px 9px; font-size:13px; font-family:inherit;
+    }
+    .tnl-note-textarea{ resize:vertical; min-height:60px; }
+    .tnl-note-colour-row{ display:flex; align-items:center; gap:8px; }
+    .tnl-note-colour-row .tnl-note-input{ flex:1 1 auto; min-width:0; }
+    .tnl-note-colour-row input[type="color"]{
+      width:34px; height:30px; flex:0 0 auto; padding:0;
+      border:1px solid rgba(255,255,255,0.2); border-radius:6px;
+      background:#111; cursor:pointer;
+    }
+    .tnl-note-footer{ display:flex; align-items:center; justify-content:flex-end; gap:8px; margin-top:4px; }
+    .tnl-note-status{ font-size:11px; opacity:0.7; margin-right:auto; }
+    .tnl-note-btn{
+      background:rgba(255,255,255,0.12); color:#f0f0f0; cursor:pointer;
+      border:1px solid rgba(255,255,255,0.2); border-radius:6px;
+      padding:6px 14px; font-size:12px;
+    }
+    .tnl-note-btn:hover{ background:rgba(255,255,255,0.2); }
+    .tnl-note-btn:disabled{ opacity:0.5; cursor:default; }
+    .tnl-note-btn-primary{ background:rgba(90,160,255,0.28); border-color:rgba(90,160,255,0.5); }
+    .tnl-note-btn-primary:hover{ background:rgba(90,160,255,0.4); }
+    .tnl-note-btn-danger{ background:rgba(220,70,70,0.18); border-color:rgba(220,70,70,0.4); }
+    .tnl-note-btn-danger:hover{ background:rgba(220,70,70,0.32); }
+  `;
+  document.head.appendChild(noteModalStyle);
+
+  let noteModalEl = null;
+
+  function onNoteModalKeydown(e) {
+    if (e.key === 'Escape') { e.stopPropagation(); closeNoteModal(); }
+  }
+
+  function closeNoteModal() {
+    if (noteModalEl) { noteModalEl.remove(); noteModalEl = null; }
+    document.removeEventListener('keydown', onNoteModalKeydown, true);
+  }
+
+  function openNoteModal(label, cur, { onSave, onDelete }) {
+    closeNoteModal();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'tnl-note-overlay';
+
+    const panel = document.createElement('div');
+    panel.className = 'tnl-note-panel';
+
+    const title = document.createElement('div');
+    title.className = 'tnl-note-title';
+    title.textContent = `Edit note — ${label}`;
+    panel.appendChild(title);
+
+    const noteField = document.createElement('div');
+    noteField.className = 'tnl-note-field';
+    const noteLabel = document.createElement('label');
+    noteLabel.className = 'tnl-note-label';
+    noteLabel.textContent = 'Note';
+    const noteInput = document.createElement('textarea');
+    noteInput.className = 'tnl-note-textarea';
+    noteInput.value = cur.note || '';
+    noteField.append(noteLabel, noteInput);
+    panel.appendChild(noteField);
+
+    const colourField = document.createElement('div');
+    colourField.className = 'tnl-note-field';
+    const colourLabel = document.createElement('label');
+    colourLabel.className = 'tnl-note-label';
+    colourLabel.textContent = 'Colour tag';
+    const colourRow = document.createElement('div');
+    colourRow.className = 'tnl-note-colour-row';
+    const colourPicker = document.createElement('input');
+    colourPicker.type = 'color';
+    const colourText = document.createElement('input');
+    colourText.type = 'text';
+    colourText.className = 'tnl-note-input';
+    colourText.placeholder = 'CSS/hex, e.g. #ff8800 (blank = none)';
+    colourText.value = cur.colour || '';
+    const validHex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i;
+    colourPicker.value = validHex.test(cur.colour || '') ? cur.colour : '#ffffff';
+    colourPicker.addEventListener('input', () => { colourText.value = colourPicker.value; });
+    colourRow.append(colourPicker, colourText);
+    colourField.append(colourLabel, colourRow);
+    panel.appendChild(colourField);
+
+    const ownerField = document.createElement('div');
+    ownerField.className = 'tnl-note-field';
+    const ownerLabel = document.createElement('label');
+    ownerLabel.className = 'tnl-note-label';
+    ownerLabel.textContent = 'Owner';
+    const ownerInput = document.createElement('input');
+    ownerInput.type = 'text';
+    ownerInput.className = 'tnl-note-input';
+    ownerInput.value = cur.owner || '';
+    ownerField.append(ownerLabel, ownerInput);
+    panel.appendChild(ownerField);
+
+    const footer = document.createElement('div');
+    footer.className = 'tnl-note-footer';
+
+    const status = document.createElement('span');
+    status.className = 'tnl-note-status';
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'tnl-note-btn tnl-note-btn-danger';
+    deleteBtn.textContent = 'Delete';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'tnl-note-btn';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', closeNoteModal);
+
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'tnl-note-btn tnl-note-btn-primary';
+    saveBtn.textContent = 'Save';
+
+    // Both Save and Delete now stay open, show progress, and only close the
+    // modal (or report failure) once the server round trip actually
+    // resolves — clicking Save/Delete used to close the modal immediately,
+    // so a failed request only surfaced as an alert *after* the user had
+    // already moved on and couldn't easily retry from the same context.
+    let busy = false;
+    function setBusy(isBusy, label) {
+      busy = isBusy;
+      saveBtn.disabled = isBusy;
+      deleteBtn.disabled = isBusy;
+      cancelBtn.disabled = isBusy;
+      status.textContent = isBusy ? label : '';
+    }
+
+    deleteBtn.addEventListener('click', async () => {
+      if (busy) return;
+      if (!confirm(`Delete the saved note for ${label}?`)) return;
+      setBusy(true, 'Deleting…');
+      await onDelete();
+      closeNoteModal();
+    });
+
+    saveBtn.addEventListener('click', async () => {
+      if (busy) return;
+      setBusy(true, 'Saving…');
+      const d = {
+        note: noteInput.value.trim(),
+        colour: colourText.value.trim(),
+        owner: ownerInput.value.trim()
+      };
+      const ok = await onSave(d);
+      if (ok === false) {
+        // saveData() already alerted with the specific error; keep the
+        // modal open with the user's input intact so they can retry.
+        setBusy(false, '');
+        return;
+      }
+      closeNoteModal();
+    });
+
+    footer.append(status, deleteBtn, cancelBtn, saveBtn);
+    panel.appendChild(footer);
+
+    overlay.appendChild(panel);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay && !busy) closeNoteModal(); });
+    document.body.appendChild(overlay);
+    noteModalEl = overlay;
+    document.addEventListener('keydown', onNoteModalKeydown, true);
+    noteInput.focus();
+  }
 
   // ---------- Leadership: manage access lists ----------
 
@@ -1188,6 +1421,10 @@
 
     registerMenu('🔑 Set / update Torn API key', promptSetApiKey);
 
+    registerMenu('🔄 Refresh Access Level', () => {
+      forceRefreshAccess().catch((e) => log('forceRefreshAccess error', e));
+    });
+
     if (USER_ROLE === 'leadership') {
       registerMenu('👑 Manage Leadership / Council', openCouncilManager);
     }
@@ -1211,12 +1448,18 @@
       const id = TORN_USER_ID ? `#${TORN_USER_ID}` : 'unknown';
       const name = TORN_USER_NAME || 'unknown';
       const keyState = getTornApiKey() ? 'set' : 'not set';
+      const serverState = {
+        live: 'reachable (just checked)',
+        cache: 'reachable (using recent cached result)',
+        error: 'UNREACHABLE — showing last known/default access'
+      }[ACCESS_SOURCE] || ACCESS_SOURCE;
       alert(
         'Armory Notes\n' +
         `User: ${name} (${id})\n` +
         `Role: ${USER_ROLE}\n` +
         `Write access: ${USER_CAN_WRITE ? 'yes' : 'no'}\n` +
-        `Torn API key: ${keyState}`
+        `Torn API key: ${keyState}\n` +
+        `Server: ${serverState}`
       );
     });
   }
@@ -1231,7 +1474,8 @@
 
   // Step 2 — the server resolves our identity from the key and tells us our role.
   // If the key is missing/invalid the server falls back to read-only access.
-  const access = await fetchAccessRole();
+  // Cached for a few minutes so a site-wide @match doesn't hammer the tunnel.
+  const access = await getAccessRole();
   USER_ROLE = access.role || 'readonly';
   USER_CAN_WRITE = !!access.canWrite;
   TORN_USER_ID = access.userId || null;
