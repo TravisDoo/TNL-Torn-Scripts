@@ -1,12 +1,9 @@
 // ==UserScript==
 // @name         Armory Notes
-// @version      3.6.3
+// @version      3.8.0
 // @description  Shared Torn notes. Edit access is authenticated via your public Torn API key; everyone else is read-only.
 // @updateURL    https://raw.githubusercontent.com/TravisDoo/TNL-Torn-Scripts/main/Armory.user.js
 // @downloadURL  https://raw.githubusercontent.com/TravisDoo/TNL-Torn-Scripts/main/Armory.user.js
-// @match        https://www.torn.com/item.php*
-// @match        https://www.torn.com/factions.php?step=your*
-// @match        https://www.torn.com/trade.php*
 // @match        https://www.torn.com/*
 // @grant        GM_registerMenuCommand
 // @grant        GM_xmlhttpRequest
@@ -14,7 +11,7 @@
 // @grant        GM_setValue
 // @grant        GM_listValues
 // @grant        GM_deleteValue
-// @connect      bunch-uphold-antennae.ngrok-free.dev
+// @connect      armory.the-next-level.net
 // @run-at       document-idle
 // @author       DoobyDoo, MonChoon
 // ==/UserScript==
@@ -22,7 +19,12 @@
 (async function () {
   'use strict';
 
-  const SERVER_BASE = 'https://bunch-uphold-antennae.ngrok-free.dev/armory';
+  // Served through a Cloudflare Tunnel (cloudflared) rather than ngrok's
+  // free tier — no connection-rate limit, so this shouldn't need the
+  // handshake-retry workarounds that ngrok's free plan required. If you
+  // ever move the tunnel to a different hostname, update this AND the
+  // @connect line in the userscript header above to match.
+  const SERVER_BASE = 'https://armory.the-next-level.net/armory';
   const TEAM_ID = 'tnl-faction';
   const API_KEY = 'The-Next-Level';
 
@@ -306,25 +308,170 @@ async function httpRequest({
     location.reload();
   }
 
-  function openArmoryAccessSettings() {
-    const userId = TORN_USER_ID ? `#${TORN_USER_ID}` : 'unknown';
-    const userName = TORN_USER_NAME || 'unknown';
-    const keyState = getTornApiKey() ? 'set' : 'not set';
+  // ---------- Mobile/PDA menu (replaces GM_registerMenuCommand) ----------
 
-    const serverState = ACCESS_SOURCE === 'error' ? 'unreachable' : 'reachable';
+  // Torn PDA doesn't reliably expose GM_registerMenuCommand, so every item
+  // that's a normal Tampermonkey menu entry on desktop — theme, API key,
+  // refresh access, Leadership/Council management, deletion mode, cache
+  // clear, access info — needs an equivalent that's reachable by tapping
+  // the Settings -> Utilities button injected below. This mirrors
+  // registerMenus() as an in-page list instead of relying on a menu API
+  // PDA doesn't support.
+  const armoryMenuStyle = document.createElement('style');
+  armoryMenuStyle.textContent = `
+    .tnl-menu-overlay{
+      position:fixed; inset:0; z-index:1000000;
+      background:rgba(0,0,0,0.55);
+      display:flex; align-items:center; justify-content:center; padding:16px;
+    }
+    .tnl-menu-panel{
+      background:#1b1b1b; color:#f0f0f0;
+      border:1px solid rgba(255,255,255,0.15); border-radius:10px;
+      width:100%; max-width:360px; max-height:85vh; overflow:auto;
+      padding:14px 16px; box-shadow:0 12px 40px rgba(0,0,0,0.5);
+      font-size:13px; line-height:1.4;
+    }
+    .tnl-menu-title{ font-size:15px; font-weight:600; margin-bottom:2px; }
+    .tnl-menu-sub{ font-size:11px; opacity:0.7; margin-bottom:12px; }
+    .tnl-menu-list{ display:flex; flex-direction:column; gap:6px; }
+    .tnl-menu-item{
+      display:flex; align-items:center; gap:8px; width:100%;
+      background:rgba(255,255,255,0.08); color:#f0f0f0; cursor:pointer;
+      border:1px solid rgba(255,255,255,0.15); border-radius:8px;
+      padding:10px 12px; font-size:13px; text-align:left;
+    }
+    .tnl-menu-item:hover{ background:rgba(255,255,255,0.16); }
+    .tnl-menu-footer{ display:flex; justify-content:flex-end; margin-top:10px; }
+    .tnl-menu-btn{
+      background:rgba(255,255,255,0.12); color:#f0f0f0; cursor:pointer;
+      border:1px solid rgba(255,255,255,0.2); border-radius:6px;
+      padding:6px 14px; font-size:12px;
+    }
+    .tnl-menu-btn:hover{ background:rgba(255,255,255,0.2); }
+  `;
+  document.head.appendChild(armoryMenuStyle);
 
-    const openKeyPrompt = confirm(
-      'Armory Notes\n\n' +
-      `User: ${userName} (${userId})\n` +
-      `Role: ${USER_ROLE}\n` +
-      `Write access: ${USER_CAN_WRITE ? 'yes' : 'no'}\n` +
-      `Torn API key: ${keyState}\n` +
-      `Server: ${serverState}\n\n` +
-      'Press OK to set or update your PUBLIC Torn API key.\n' +
-      'Press Cancel to close this message.'
-    );
+  let armoryMenuEl = null;
 
-    if (openKeyPrompt) promptSetApiKey();
+  function onArmoryMenuKeydown(e) {
+    if (e.key === 'Escape') { e.stopPropagation(); closeArmoryMenu(); }
+  }
+
+  function closeArmoryMenu() {
+    if (armoryMenuEl) { armoryMenuEl.remove(); armoryMenuEl = null; }
+    document.removeEventListener('keydown', onArmoryMenuKeydown, true);
+  }
+
+  function openArmoryMenu() {
+    closeArmoryMenu();
+
+    const id = TORN_USER_ID ? `#${TORN_USER_ID}` : 'unknown';
+    const name = TORN_USER_NAME || 'unknown';
+
+    const overlay = document.createElement('div');
+    overlay.className = 'tnl-menu-overlay';
+
+    const panel = document.createElement('div');
+    panel.className = 'tnl-menu-panel';
+
+    const title = document.createElement('div');
+    title.className = 'tnl-menu-title';
+    title.textContent = 'Armory Notes';
+    panel.appendChild(title);
+
+    const sub = document.createElement('div');
+    sub.className = 'tnl-menu-sub';
+    sub.textContent =
+      `${name} (${id}) — ${USER_ROLE}, ${USER_CAN_WRITE ? 'write access' : 'read-only'}`;
+    panel.appendChild(sub);
+
+    const list = document.createElement('div');
+    list.className = 'tnl-menu-list';
+
+    const addItem = (label, handler) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'tnl-menu-item';
+      item.textContent = label;
+      item.addEventListener('click', () => {
+        closeArmoryMenu();
+        handler();
+      });
+      list.appendChild(item);
+    };
+
+    // Same set of actions as registerMenus() below, minus the Tampermonkey
+    // menu API — every item here calls the exact same function the desktop
+    // menu does, so behavior (including the leadership/write-access gating)
+    // stays identical between platforms.
+    addItem(`🎨 Theme: ${tooltipTheme}`, cycleTheme);
+    addItem('🔑 Set / update Torn API key', promptSetApiKey);
+    addItem('🔄 Refresh Access Level', () => {
+      forceRefreshAccess().catch((e) => log('forceRefreshAccess error', e));
+    });
+
+    if (USER_ROLE === 'leadership') {
+      addItem('👑 Manage Leadership / Council', openCouncilManager);
+    }
+
+    if (USER_CAN_WRITE) {
+      addItem('🧨 Toggle Deletion Mode', () => {
+        deletionMode = !deletionMode;
+        alert(deletionMode
+          ? 'Deletion mode ON — click a note button (📝) to DELETE that note instead of editing it.'
+          : 'Deletion mode OFF — note buttons edit as normal.');
+      });
+    }
+
+    addItem('🧹 Clear Notes Cache', () => {
+      CACHE = {};
+      try { GM_setValue(CACHE_KEY, {}); } catch (e) { log('clear cache error', e); }
+      alert('Torn Notes cache cleared');
+    });
+
+    addItem('ℹ️ My Access Level', () => {
+      const keyState = getTornApiKey() ? 'set' : 'not set';
+      const serverState = {
+        live: 'reachable (just checked)',
+        cache: 'reachable (using recent cached result)',
+        error: 'UNREACHABLE — showing last known/default access'
+      }[ACCESS_SOURCE] || ACCESS_SOURCE;
+      alert(
+        'Armory Notes\n' +
+        `User: ${name} (${id})\n` +
+        `Role: ${USER_ROLE}\n` +
+        `Write access: ${USER_CAN_WRITE ? 'yes' : 'no'}\n` +
+        `Torn API key: ${keyState}\n` +
+        `Server: ${serverState}`
+      );
+    });
+
+    panel.appendChild(list);
+
+    const footer = document.createElement('div');
+    footer.className = 'tnl-menu-footer';
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'tnl-menu-btn';
+    closeBtn.textContent = 'Close';
+    closeBtn.addEventListener('click', closeArmoryMenu);
+    footer.appendChild(closeBtn);
+    panel.appendChild(footer);
+
+    overlay.appendChild(panel);
+
+    let menuMouseDownOnBackdrop = false;
+    overlay.addEventListener('mousedown', (e) => {
+      menuMouseDownOnBackdrop = (e.target === overlay);
+    });
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay && menuMouseDownOnBackdrop) closeArmoryMenu();
+      menuMouseDownOnBackdrop = false;
+    });
+
+    document.body.appendChild(overlay);
+    armoryMenuEl = overlay;
+    document.addEventListener('keydown', onArmoryMenuKeydown, true);
   }
 
   function makeSettingsKeyIcon(templateSvg) {
@@ -386,8 +533,8 @@ async function httpRequest({
         button.disabled = false;
         button.removeAttribute('disabled');
         button.removeAttribute('aria-disabled');
-        button.setAttribute('aria-label', 'Armory Notes API Key');
-        button.title = 'View access or set your Armory Notes Torn API key';
+        button.setAttribute('aria-label', 'Armory Notes Menu');
+        button.title = 'Open the Armory Notes menu (API key, access, Leadership/Council)';
 
         const spans = Array.from(button.querySelectorAll('span'));
         const title = spans.find((span) => {
@@ -395,7 +542,7 @@ async function httpRequest({
           return value === 'mark all as read' || value === 'close all private chats';
         }) || spans.at(-1);
 
-        if (title) title.textContent = 'Armory Notes API Key';
+        if (title) title.textContent = 'Armory Notes Menu';
 
         const oldSvg = button.querySelector('svg');
         if (oldSvg) oldSvg.replaceWith(makeSettingsKeyIcon(oldSvg));
@@ -403,7 +550,7 @@ async function httpRequest({
         button.addEventListener('click', (event) => {
           event.preventDefault();
           event.stopPropagation();
-          openArmoryAccessSettings();
+          openArmoryMenu();
         });
 
         buttonContainer.appendChild(button);
@@ -423,47 +570,57 @@ async function httpRequest({
   const ACCESS_CACHE_TTL_MS = 5 * 60 * 1000;
 
   async function fetchAccessRoleLive() {
-  try {
-    const response = await httpRequest({
-      method: 'GET',
-      url: `${SERVER_BASE}/api/access-check`,
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': API_KEY,
-        'X-Torn-API-Key': TORN_API_KEY || '',
-        'ngrok-skip-browser-warning': '1'
-      },
-      timeout: 10000
-    });
+  // Same reasoning as req(): only retry the connection-level failure, not
+  // a real HTTP error response from the server.
+  const MAX_ATTEMPTS = 3;
 
-    const data = response.responseText
-      ? JSON.parse(response.responseText)
-      : {};
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const response = await httpRequest({
+        method: 'GET',
+        url: `${SERVER_BASE}/api/access-check`,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': API_KEY,
+          'X-Torn-API-Key': TORN_API_KEY || ''
+        },
+        timeout: 10000
+      });
 
-    if (response.status >= 200 && response.status < 300) {
-      return {
-        ok: true,
-        ...data
-      };
+      const data = response.responseText
+        ? JSON.parse(response.responseText)
+        : {};
+
+      if (response.status >= 200 && response.status < 300) {
+        return {
+          ok: true,
+          ...data
+        };
+      }
+
+      console.error(
+        '[TornNotes] Access check HTTP error',
+        response.status,
+        data
+      );
+
+      return { ok: false };
+    } catch (error) {
+      const isLastAttempt = attempt === MAX_ATTEMPTS;
+      const info = { attempt, maxAttempts: MAX_ATTEMPTS, transport: error?.transport || '' };
+
+      if (isLastAttempt) {
+        console.error('[TornNotes] Access check network error (all retries exhausted)', info, error);
+        return { ok: false };
+      }
+
+      log('[TornNotes] Access check network error, retrying', info, error);
+      await sleep(300 * attempt);
     }
-
-    console.error(
-      '[TornNotes] Access check HTTP error',
-      response.status,
-      data
-    );
-
-    return { ok: false };
-  } catch (error) {
-    console.error(
-      '[TornNotes] Access check network error',
-      error?.transport || '',
-      error
-    );
-
-    return { ok: false };
   }
-}
+
+  return { ok: false };
+  }
 
   function readAccessCache() {
     try {
@@ -729,34 +886,58 @@ async function httpRequest({
 
   // ---------- Server ----------
 
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   async function req(method, path, body) {
+  // Only the transport step (the actual TLS/socket round trip) gets
+  // retried. A response that came back with a real HTTP status (4xx/5xx)
+  // or malformed JSON is a legitimate answer from the server and retrying
+  // it won't change anything — it's specifically the connection-level
+  // failures (dropped/aborted handshakes, timeouts) seen on Torn PDA that
+  // are transient and worth a couple of quick retries.
+  const MAX_ATTEMPTS = 3;
   let response;
 
-  try {
-    response = await httpRequest({
-      method,
-      url: SERVER_BASE + path,
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': API_KEY,
-        'X-Torn-API-Key': TORN_API_KEY || '',
-        'ngrok-skip-browser-warning': '1'
-      },
-      data: body != null ? JSON.stringify(body) : undefined,
-      timeout: 12000
-    });
-  } catch (error) {
-    console.error(
-      '[TornNotes] HTTP transport failed',
-      {
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      response = await httpRequest({
+        method,
+        url: SERVER_BASE + path,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': API_KEY,
+          'X-Torn-API-Key': TORN_API_KEY || ''
+        },
+        data: body != null ? JSON.stringify(body) : undefined,
+        timeout: 12000
+      });
+      break;
+    } catch (error) {
+      const isLastAttempt = attempt === MAX_ATTEMPTS;
+      const info = {
         method,
         path,
+        attempt,
+        maxAttempts: MAX_ATTEMPTS,
         transport: error?.transport || 'unknown',
         message: error?.message || String(error)
-      }
-    );
+      };
 
-    throw error;
+      // A transient handshake/timeout that a retry recovers from isn't
+      // actually a problem — logging it as console.error on every attempt
+      // just makes the console look like everything is failing when it
+      // isn't. Only the final, truly-exhausted failure is worth surfacing;
+      // earlier attempts go to the DEBUG-gated log() instead.
+      if (isLastAttempt) {
+        console.error('[TornNotes] HTTP transport failed (all retries exhausted)', info);
+        throw error;
+      }
+
+      log('[TornNotes] HTTP transport failed, retrying', info);
+      await sleep(300 * attempt);
+    }
   }
 
   let data;
@@ -964,7 +1145,11 @@ async function httpRequest({
 
   const STALE_KEYS = new Set();
   let refreshTimer = null;
-  const CONCURRENCY = 8;
+  // Torn PDA's underlying HTTP client seems to struggle with many
+  // simultaneous TLS handshakes to the same host (surfaces as "Handshake
+  // Connection terminated during handshake"), which desktop browsers don't
+  // hit thanks to HTTP/2 connection multiplexing. Keep PDA's fan-out small.
+  const CONCURRENCY = IS_PDA ? 2 : 8;
 
   function scheduleRefresh() {
     if (refreshTimer) return;
@@ -1450,7 +1635,21 @@ async function httpRequest({
     panel.appendChild(footer);
 
     overlay.appendChild(panel);
-    overlay.addEventListener('click', (e) => { if (e.target === overlay && !busy) closeNoteModal(); });
+
+    // Close-on-click-outside used to fire from a plain 'click' listener,
+    // which fires wherever the mouse is *released* — so dragging to select
+    // text in the note field and letting go past the panel edge (over the
+    // backdrop) counted as "clicking outside" and closed the modal mid-drag.
+    // Requiring the mousedown to *also* have started on the backdrop fixes
+    // that: a drag that begins inside the panel no longer counts.
+    let overlayMouseDownOnBackdrop = false;
+    overlay.addEventListener('mousedown', (e) => {
+      overlayMouseDownOnBackdrop = (e.target === overlay);
+    });
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay && overlayMouseDownOnBackdrop && !busy) closeNoteModal();
+      overlayMouseDownOnBackdrop = false;
+    });
     document.body.appendChild(overlay);
     noteModalEl = overlay;
     document.addEventListener('keydown', onNoteModalKeydown, true);
@@ -1627,8 +1826,13 @@ async function httpRequest({
 
     const overlay = document.createElement('div');
     overlay.className = 'tnl-council-overlay';
+    let councilMouseDownOnBackdrop = false;
+    overlay.addEventListener('mousedown', (e) => {
+      councilMouseDownOnBackdrop = (e.target === overlay);
+    });
     overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) closeCouncilModal();
+      if (e.target === overlay && councilMouseDownOnBackdrop) closeCouncilModal();
+      councilMouseDownOnBackdrop = false;
     });
 
     const panel = document.createElement('div');
