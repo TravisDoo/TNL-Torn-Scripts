@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Armory Notes
-// @version      3.6
+// @version      3.6.3
 // @description  Shared Torn notes. Edit access is authenticated via your public Torn API key; everyone else is read-only.
 // @updateURL    https://raw.githubusercontent.com/TravisDoo/TNL-Torn-Scripts/main/Armory.user.js
 // @downloadURL  https://raw.githubusercontent.com/TravisDoo/TNL-Torn-Scripts/main/Armory.user.js
@@ -40,9 +40,218 @@
   const THEMES = ['Torn Dark', 'Torn Green'];
   let tooltipTheme = GM_getValue('torn-notes-tooltip-theme', THEMES[0]);
 
-  const IS_PDA =
-    /GMforPDA/i.test((window.GM_info && window.GM_info.scriptHandler) || '') ||
-    typeof window.PDA_httpGet === 'function';
+  // ---------- Runtime detection + cross-platform HTTP ----------
+
+const PDA_HTTP = {
+  GET:
+    typeof PDA_httpGet === 'function' ? PDA_httpGet :
+    typeof window.PDA_httpGet === 'function'
+      ? window.PDA_httpGet.bind(window)
+      : null,
+
+  POST:
+    typeof PDA_httpPost === 'function' ? PDA_httpPost :
+    typeof window.PDA_httpPost === 'function'
+      ? window.PDA_httpPost.bind(window)
+      : null,
+
+  PUT:
+    typeof PDA_httpPut === 'function' ? PDA_httpPut :
+    typeof window.PDA_httpPut === 'function'
+      ? window.PDA_httpPut.bind(window)
+      : null,
+
+  DELETE:
+    typeof PDA_httpDelete === 'function' ? PDA_httpDelete :
+    typeof window.PDA_httpDelete === 'function'
+      ? window.PDA_httpDelete.bind(window)
+      : null,
+
+  PATCH:
+    typeof PDA_httpPatch === 'function' ? PDA_httpPatch :
+    typeof window.PDA_httpPatch === 'function'
+      ? window.PDA_httpPatch.bind(window)
+      : null
+};
+
+const SCRIPT_HANDLER =
+  (typeof GM_info !== 'undefined' && GM_info && GM_info.scriptHandler) ||
+  (window.GM_info && window.GM_info.scriptHandler) ||
+  '';
+
+const IS_PDA =
+  /GMforPDA|Torn PDA/i.test(SCRIPT_HANDLER) ||
+  !!PDA_HTTP.GET ||
+  typeof window.flutter_inappwebview?.callHandler === 'function';
+
+const GM_REQUEST =
+  typeof GM_xmlhttpRequest === 'function'
+    ? GM_xmlhttpRequest
+    : typeof window.GM_xmlhttpRequest === 'function'
+      ? window.GM_xmlhttpRequest.bind(window)
+      : null;
+
+function normalizeHttpResponse(response, transport) {
+  let responseText = '';
+
+  if (typeof response?.responseText === 'string') {
+    responseText = response.responseText;
+  } else if (response?.responseText != null) {
+    try {
+      responseText = JSON.stringify(response.responseText);
+    } catch {
+      responseText = String(response.responseText);
+    }
+  } else if (typeof response?.body === 'string') {
+    responseText = response.body;
+  } else if (response?.body != null) {
+    try {
+      responseText = JSON.stringify(response.body);
+    } catch {
+      responseText = String(response.body);
+    }
+  }
+
+  return {
+    status: Number(response?.status || response?.statusCode || 0),
+    statusText: String(response?.statusText || ''),
+    responseText,
+    responseHeaders: String(response?.responseHeaders || ''),
+    transport
+  };
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  let timer = null;
+
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`${label} timed out after ${timeoutMs} ms`);
+      error.code = 'TIMEOUT';
+      reject(error);
+    }, timeoutMs);
+  });
+
+  return Promise.race([Promise.resolve(promise), timeoutPromise])
+    .finally(() => clearTimeout(timer));
+}
+
+// Torn PDA's native PDA_http* functions bypass GM_xmlhttpRequest's CORS
+// handling and (in some PDA builds) don't reliably support custom headers
+// or timeouts the way this script needs. GM_xmlhttpRequest already works
+// fine inside PDA, so the native path below is built but intentionally
+// switched off. Flip this to true (and retest on PDA) if you want to try
+// native transport again — leaving PDA_HTTP undetected has zero effect
+// either way since this flag gates it regardless.
+const USE_PDA_NATIVE_TRANSPORT = false;
+
+async function httpRequest({
+  method = 'GET',
+  url,
+  headers = {},
+  data,
+  timeout = 10000
+}) {
+  const verb = String(method || 'GET').toUpperCase();
+
+  const pdaFn = PDA_HTTP[verb];
+
+  if (USE_PDA_NATIVE_TRANSPORT && IS_PDA && typeof pdaFn === 'function') {
+    const transport = `Torn PDA native (${verb})`;
+
+    try {
+      const request =
+        verb === 'GET' || verb === 'DELETE'
+          ? pdaFn(url, headers)
+          : pdaFn(url, headers, data ?? '');
+
+      const response = await withTimeout(request, timeout, transport);
+      return normalizeHttpResponse(response, transport);
+    } catch (error) {
+      error.transport = transport;
+      throw error;
+    }
+  }
+
+  if (typeof GM_REQUEST === 'function') {
+    const transport = 'GM_xmlhttpRequest';
+
+    return await new Promise((resolve, reject) => {
+      GM_REQUEST({
+        method: verb,
+        url,
+        headers,
+        data,
+        timeout,
+
+        onload: (response) => {
+          resolve(normalizeHttpResponse(response, transport));
+        },
+
+        onerror: (event) => {
+          const error = new Error(
+            event?.error ||
+            event?.message ||
+            'GM_xmlhttpRequest network error'
+          );
+          error.transport = transport;
+          reject(error);
+        },
+
+        ontimeout: () => {
+          const error = new Error(
+            `GM_xmlhttpRequest timed out after ${timeout} ms`
+          );
+          error.code = 'TIMEOUT';
+          error.transport = transport;
+          reject(error);
+        },
+
+        onabort: () => {
+          const error = new Error('GM_xmlhttpRequest was aborted');
+          error.code = 'ABORTED';
+          error.transport = transport;
+          reject(error);
+        }
+      });
+    });
+  }
+
+  const transport = 'browser fetch';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const response = await fetch(url, {
+      method: verb,
+      headers,
+      body:
+        verb === 'GET' || verb === 'HEAD'
+          ? undefined
+          : data,
+      credentials: 'omit',
+      signal: controller.signal
+    });
+
+    return {
+      status: response.status,
+      statusText: response.statusText,
+      responseText: await response.text(),
+      responseHeaders: '',
+      transport
+    };
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      error = new Error(`fetch timed out after ${timeout} ms`);
+      error.code = 'TIMEOUT';
+    }
+
+    error.transport = transport;
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
   const registerMenu =
     typeof GM_registerMenuCommand === 'function'
@@ -214,30 +423,47 @@
   const ACCESS_CACHE_TTL_MS = 5 * 60 * 1000;
 
   async function fetchAccessRoleLive() {
-    return new Promise((resolve) => {
-      GM_xmlhttpRequest({
-        method: 'GET',
-        url: `${SERVER_BASE}/api/access-check`,
-        headers: {
-            'Content-Type': 'application/json',
-            'X-API-Key': API_KEY,
-            'X-Torn-API-Key': TORN_API_KEY || '',
-            'ngrok-skip-browser-warning': '1'
-        },
-        timeout: 8000,
-        onload: (r) => {
-          try {
-            const d = JSON.parse(r.responseText);
-            resolve({ ok: true, ...d });
-          } catch {
-            resolve({ ok: false });
-          }
-        },
-        onerror: () => resolve({ ok: false }),
-        ontimeout: () => resolve({ ok: false })
-      });
+  try {
+    const response = await httpRequest({
+      method: 'GET',
+      url: `${SERVER_BASE}/api/access-check`,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': API_KEY,
+        'X-Torn-API-Key': TORN_API_KEY || '',
+        'ngrok-skip-browser-warning': '1'
+      },
+      timeout: 10000
     });
+
+    const data = response.responseText
+      ? JSON.parse(response.responseText)
+      : {};
+
+    if (response.status >= 200 && response.status < 300) {
+      return {
+        ok: true,
+        ...data
+      };
+    }
+
+    console.error(
+      '[TornNotes] Access check HTTP error',
+      response.status,
+      data
+    );
+
+    return { ok: false };
+  } catch (error) {
+    console.error(
+      '[TornNotes] Access check network error',
+      error?.transport || '',
+      error
+    );
+
+    return { ok: false };
   }
+}
 
   function readAccessCache() {
     try {
@@ -504,32 +730,68 @@
   // ---------- Server ----------
 
   async function req(method, path, body) {
-    return new Promise((res, rej) => {
-      GM_xmlhttpRequest({
-        method,
-        url: SERVER_BASE + path,
-        headers: {
-            'Content-Type': 'application/json',
-            'X-API-Key': API_KEY,
-            'X-Torn-API-Key': TORN_API_KEY || '',
-            'ngrok-skip-browser-warning': '1'
-        },
-        data: body != null ? JSON.stringify(body) : undefined,
-        timeout: 10000,
-        onload: (r) => {
-          try {
-            const d = r.responseText ? JSON.parse(r.responseText) : {};
-            if (r.status >= 200 && r.status < 300) res(d);
-            else rej(d);
-          } catch (e) {
-            rej(e);
-          }
-        },
-        onerror: () => rej(new Error('network')),
-        ontimeout: () => rej(new Error('timeout'))
-      });
+  let response;
+
+  try {
+    response = await httpRequest({
+      method,
+      url: SERVER_BASE + path,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': API_KEY,
+        'X-Torn-API-Key': TORN_API_KEY || '',
+        'ngrok-skip-browser-warning': '1'
+      },
+      data: body != null ? JSON.stringify(body) : undefined,
+      timeout: 12000
     });
+  } catch (error) {
+    console.error(
+      '[TornNotes] HTTP transport failed',
+      {
+        method,
+        path,
+        transport: error?.transport || 'unknown',
+        message: error?.message || String(error)
+      }
+    );
+
+    throw error;
   }
+
+  let data;
+
+  try {
+    data = response.responseText
+      ? JSON.parse(response.responseText)
+      : {};
+  } catch {
+    const error = new Error(
+      `Server returned non-JSON data (HTTP ${response.status || 0})`
+    );
+
+    error.status = response.status;
+    error.transport = response.transport;
+    error.rawResponse = response.responseText;
+    throw error;
+  }
+
+  if (response.status >= 200 && response.status < 300) {
+    return data;
+  }
+
+  const message =
+    data?.error ||
+    data?.message ||
+    `Request failed with HTTP ${response.status || 0}`;
+
+  const error = new Error(message);
+  error.status = response.status;
+  error.transport = response.transport;
+  error.serverResponse = data;
+
+  throw error;
+}
 
   // ---------- Caching (SWR-style) ----------
 
@@ -647,13 +909,16 @@
 
     openNoteModal(label, cur, {
       onSave: async (d) => {
-        log('Saving', key, d);
-        await saveData(key, d);
-        log('Saved', key);
+          log('Saving', key, d);
+
+          const saved = await saveData(key, d);
+
+          log('Save result for', key, saved);
+          return saved;
       },
       onDelete: async () => {
-        log('Deleting via modal', key);
-        await delData(key);
+          log('Deleting via modal', key);
+          return await delData(key);
       }
     });
   }
@@ -672,12 +937,19 @@
     const set = UI_INDEX.get(key);
     if (!set) return;
     for (const refs of Array.from(set)) {
-      const { li, badge } = refs;
+      const { li, badge, tooltipEl } = refs;
       if (!li.isConnected || !badge) { set.delete(refs); continue; }
+      // The tooltip attribute lives on the name element (tooltipEl), not the
+      // whole row (li). The row also contains Torn's own icons — like the
+      // red/grey perk-slot circles — which have their own native tooltips;
+      // putting data-note-tooltip on the full li makes our hover handler
+      // (which uses closest()) win over those every time the mouse moves
+      // anywhere in the row.
+      const anchor = tooltipEl || li;
       if (d.note) {
-        li.setAttribute('data-note-tooltip', d.note);
+        anchor.setAttribute('data-note-tooltip', d.note);
       } else {
-        li.removeAttribute('data-note-tooltip');
+        anchor.removeAttribute('data-note-tooltip');
       }
       const colourVal = (d.colour || '').trim();
       applyBadgeColour(badge, colourVal);
@@ -827,7 +1099,7 @@
       BTN_CTX.set(btn, { key, el: li, badge, label: labelFn(name) });
     }
     li.classList.add('tnl-enhanced');
-    registerUI(key, { li, badge });
+    registerUI(key, { li, badge, tooltipEl: nameEl });
 
     applyDataToUI(key, getCached(key));
     if (!isFresh(key)) {
@@ -1141,11 +1413,6 @@
     saveBtn.className = 'tnl-note-btn tnl-note-btn-primary';
     saveBtn.textContent = 'Save';
 
-    // Both Save and Delete now stay open, show progress, and only close the
-    // modal (or report failure) once the server round trip actually
-    // resolves — clicking Save/Delete used to close the modal immediately,
-    // so a failed request only surfaced as an alert *after* the user had
-    // already moved on and couldn't easily retry from the same context.
     let busy = false;
     function setBusy(isBusy, label) {
       busy = isBusy;
@@ -1173,8 +1440,6 @@
       };
       const ok = await onSave(d);
       if (ok === false) {
-        // saveData() already alerted with the specific error; keep the
-        // modal open with the user's input intact so they can retry.
         setBusy(false, '');
         return;
       }
@@ -1194,9 +1459,6 @@
 
   // ---------- Leadership: manage access lists ----------
 
-  // A modal that lets Leadership view the Leadership/Council rosters and
-  // add/remove members by Torn ID. Every change goes through the server, which
-  // rewrites config.js, so edits apply for everyone on their next request.
   const councilStyle = document.createElement('style');
   councilStyle.textContent = `
     .tnl-council-overlay{
@@ -1285,7 +1547,10 @@
       await req('POST', `/api/${listName}/${action}`, { userId: id });
       await refreshCouncilModal();
     } catch (e) {
-      const msg = (e && e.error) ? e.error : 'Request failed.';
+      // req() now throws a real Error (message / serverResponse), not the
+      // raw parsed JSON body, so the specific server reason is on
+      // e.serverResponse.error or e.message — not e.error.
+      const msg = e?.serverResponse?.error || e?.message || 'Request failed.';
       alert(`Could not ${action} ${id}: ${msg}`);
     }
   }
@@ -1468,13 +1733,9 @@
 
   await purgeLocalOnce();
 
-  // Step 1 — make sure we have the user's Torn API key (prompt once on first run)
   TORN_API_KEY = await ensureApiKey();
   log('Torn API key present:', !!TORN_API_KEY);
 
-  // Step 2 — the server resolves our identity from the key and tells us our role.
-  // If the key is missing/invalid the server falls back to read-only access.
-  // Cached for a few minutes so a site-wide @match doesn't hammer the tunnel.
   const access = await getAccessRole();
   USER_ROLE = access.role || 'readonly';
   USER_CAN_WRITE = !!access.canWrite;
@@ -1482,13 +1743,10 @@
   TORN_USER_NAME = access.name || null;
   log('Access role:', USER_ROLE, 'canWrite:', USER_CAN_WRITE, 'id:', TORN_USER_ID);
 
-  // Step 3 — register menus now that we know whether the user can write
   registerMenus();
 
-  // Torn PDA/mobile fallback inside Settings -> Utilities.
   injectSettingsUtilityButton();
 
-  // Step 4 — now that we know the role, paint the notes UI on supported pages.
   const supportsNotesUI =
     location.pathname === '/item.php' ||
     location.pathname === '/factions.php' ||
@@ -1512,8 +1770,6 @@
       const roots = Array.from(pendingRoots);
       pendingRoots.clear();
 
-      // Settings is rendered dynamically by Torn PDA. Re-check the document
-      // whenever the panel or one of its tabs is mounted.
       injectSettingsUtilityButton();
 
       if (supportsNotesUI) {
